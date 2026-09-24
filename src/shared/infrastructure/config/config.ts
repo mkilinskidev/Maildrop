@@ -66,6 +66,24 @@ const schema = z
       .default("info"),
     DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(50).default(10),
     WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(50).default(5),
+    MAILDOCK_INITIAL_SYNC_DAYS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(365)
+      .default(30),
+    MAILDOCK_MESSAGE_FETCH_BATCH_SIZE: z.coerce
+      .number()
+      .int()
+      .min(10)
+      .max(500)
+      .default(150),
+    MAILDOCK_MESSAGE_SYNC_CONCURRENCY: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .default(2),
   })
   .superRefine((value, context) => {
     const origin = new URL(value.APP_ORIGIN);
@@ -105,6 +123,9 @@ export type AppConfig = Readonly<{
   logLevel: "fatal" | "error" | "warn" | "info" | "debug" | "trace";
   databasePoolSize: number;
   workerConcurrency: number;
+  initialSyncDays: number;
+  messageFetchBatchSize: number;
+  messageSyncConcurrency: number;
 }>;
 
 export class ConfigurationError extends Error {
@@ -145,6 +166,9 @@ export function parseConfig(
     logLevel: result.data.LOG_LEVEL,
     databasePoolSize: result.data.DATABASE_POOL_SIZE,
     workerConcurrency: result.data.WORKER_CONCURRENCY,
+    initialSyncDays: result.data.MAILDOCK_INITIAL_SYNC_DAYS,
+    messageFetchBatchSize: result.data.MAILDOCK_MESSAGE_FETCH_BATCH_SIZE,
+    messageSyncConcurrency: result.data.MAILDOCK_MESSAGE_SYNC_CONCURRENCY,
   });
 }
 

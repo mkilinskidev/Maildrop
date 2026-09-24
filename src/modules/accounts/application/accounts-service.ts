@@ -28,7 +28,7 @@ export class MailAccountNotFoundError extends Error {
 
 export class DisabledMailAccountError extends Error {
   constructor() {
-    super("Disabled mail accounts cannot run mailbox discovery.");
+    super("Disabled mail accounts cannot run provider work.");
     this.name = "DisabledMailAccountError";
   }
 }

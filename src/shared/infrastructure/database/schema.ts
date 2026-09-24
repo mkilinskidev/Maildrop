@@ -284,6 +284,29 @@ export const mailboxes = pgTable(
     uidValidityChangeCount: integer("uid_validity_change_count")
       .default(0)
       .notNull(),
+    recentSyncStatus: text("recent_sync_status")
+      .default("not_started")
+      .notNull(),
+    recentSyncRequestedAt: timestamp("recent_sync_requested_at", {
+      withTimezone: true,
+    }),
+    recentSyncStartedAt: timestamp("recent_sync_started_at", {
+      withTimezone: true,
+    }),
+    recentSyncCompletedAt: timestamp("recent_sync_completed_at", {
+      withTimezone: true,
+    }),
+    recentSyncError: text("recent_sync_error"),
+    recentSyncCutoff: timestamp("recent_sync_cutoff", { withTimezone: true }),
+    recentSyncMessageCount: integer("recent_sync_message_count")
+      .default(0)
+      .notNull(),
+    recentSyncUidValidity: bigint("recent_sync_uid_validity", {
+      mode: "bigint",
+    }),
+    lastSuccessfulRecentSyncAt: timestamp("last_successful_recent_sync_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -296,6 +319,10 @@ export const mailboxes = pgTable(
       "mailboxes_lifecycle_status",
       sql`${table.lifecycleStatus} in ('active', 'missing')`,
     ),
+    check(
+      "mailboxes_recent_sync_status",
+      sql`${table.recentSyncStatus} in ('not_started', 'pending', 'running', 'success', 'failed')`,
+    ),
     index("mailboxes_account_idx").on(table.accountId),
     index("mailboxes_account_path_idx").on(table.accountId, table.remotePath),
     uniqueIndex("mailboxes_account_provider_id_unique")
@@ -306,6 +333,101 @@ export const mailboxes = pgTable(
       .where(
         sql`${table.providerMailboxId} is null and ${table.lifecycleStatus} = 'active'`,
       ),
+  ],
+);
+
+export type MailAddress = Readonly<{ name?: string; address?: string }>;
+export type MimePart = Readonly<{
+  part: string | null;
+  type: string;
+  disposition: string | null;
+  filename: string | null;
+  encoding: string | null;
+  size: string | null;
+  contentId: string | null;
+  parameters: Readonly<Record<string, string>>;
+  dispositionParameters: Readonly<Record<string, string>>;
+  children: readonly MimePart[];
+}>;
+
+export const messages = pgTable(
+  "messages",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: "cascade" }),
+    providerMessageId: text("provider_message_id"),
+    rfcMessageId: text("rfc_message_id"),
+    subject: text("subject"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    internalDate: timestamp("internal_date", { withTimezone: true }).notNull(),
+    size: bigint("size", { mode: "bigint" }).notNull(),
+    from: jsonb("from").$type<readonly MailAddress[]>().default([]).notNull(),
+    sender: jsonb("sender")
+      .$type<readonly MailAddress[]>()
+      .default([])
+      .notNull(),
+    replyTo: jsonb("reply_to")
+      .$type<readonly MailAddress[]>()
+      .default([])
+      .notNull(),
+    to: jsonb("to").$type<readonly MailAddress[]>().default([]).notNull(),
+    cc: jsonb("cc").$type<readonly MailAddress[]>().default([]).notNull(),
+    bcc: jsonb("bcc").$type<readonly MailAddress[]>().default([]).notNull(),
+    inReplyTo: text("in_reply_to"),
+    mimeStructure: jsonb("mime_structure").$type<MimePart>(),
+    hasAttachments: boolean("has_attachments").default(false).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("messages_account_internal_date_idx").on(
+      table.accountId,
+      table.internalDate,
+    ),
+  ],
+);
+
+export const mailboxMessages = pgTable(
+  "mailbox_messages",
+  {
+    id: uuid("id").primaryKey(),
+    mailboxId: uuid("mailbox_id")
+      .notNull()
+      .references(() => mailboxes.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    uidValidity: bigint("uid_validity", { mode: "bigint" }).notNull(),
+    uid: bigint("uid", { mode: "bigint" }).notNull(),
+    modseq: bigint("modseq", { mode: "bigint" }),
+    flags: text("flags").array().default([]).notNull(),
+    firstSynchronizedAt: timestamp("first_synchronized_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastSynchronizedAt: timestamp("last_synchronized_at", {
+      withTimezone: true,
+    }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("mailbox_messages_remote_identity_unique").on(
+      table.mailboxId,
+      table.uidValidity,
+      table.uid,
+    ),
+    index("mailbox_messages_mailbox_idx").on(table.mailboxId),
+    index("mailbox_messages_message_idx").on(table.messageId),
   ],
 );
 
@@ -333,6 +455,28 @@ export const mailboxRelations = relations(mailboxes, ({ one }) => ({
   }),
 }));
 
+export const messageRelations = relations(messages, ({ one, many }) => ({
+  account: one(mailAccounts, {
+    fields: [messages.accountId],
+    references: [mailAccounts.id],
+  }),
+  placements: many(mailboxMessages),
+}));
+
+export const mailboxMessageRelations = relations(
+  mailboxMessages,
+  ({ one }) => ({
+    mailbox: one(mailboxes, {
+      fields: [mailboxMessages.mailboxId],
+      references: [mailboxes.id],
+    }),
+    message: one(messages, {
+      fields: [mailboxMessages.messageId],
+      references: [messages.id],
+    }),
+  }),
+);
+
 export const schema = {
   instanceState,
   user,
@@ -343,9 +487,13 @@ export const schema = {
   loginThrottle,
   mailAccounts,
   mailboxes,
+  messages,
+  mailboxMessages,
   userRelations,
   sessionRelations,
   accountRelations,
   mailAccountRelations,
   mailboxRelations,
+  messageRelations,
+  mailboxMessageRelations,
 };

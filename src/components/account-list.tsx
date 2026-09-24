@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import type { MailAccountView } from "@/modules/accounts/application/accounts-service";
 import type { MailboxView } from "@/modules/mail/application/mailbox-service";
+import { MessageList } from "@/components/message-list";
 
 function count(value: string | null): string {
   return value === null ? "" : new Intl.NumberFormat().format(BigInt(value));
@@ -173,6 +174,17 @@ export function AccountList({
               <MailboxHierarchy
                 mailboxes={mailboxesByAccount[account.id] ?? []}
               />
+              {(mailboxesByAccount[account.id] ?? [])
+                .filter((mailbox) => mailbox.selectable)
+                .map((mailbox) => (
+                  <details
+                    className="mailbox-messages"
+                    key={`messages-${mailbox.id}`}
+                  >
+                    <summary>Open {mailbox.name}</summary>
+                    <MessageList accountId={account.id} mailbox={mailbox} />
+                  </details>
+                ))}
               {account.mailboxDiscovery.status === "success" ? (
                 <details className="mailbox-diagnostics">
                   <summary>Discovery diagnostics</summary>

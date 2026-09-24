@@ -1,5 +1,6 @@
 import { createWorkerComposition } from "./worker.js";
 import { registerMailboxDiscoveryWorker } from "../modules/mail/infrastructure/mailbox-discovery-jobs.js";
+import { registerRecentSyncWorker } from "../modules/mail/infrastructure/recent-sync-jobs.js";
 
 const worker = createWorkerComposition();
 let stopping = false;
@@ -29,6 +30,11 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 
 try {
   await worker.jobs.start();
+  await registerRecentSyncWorker(
+    worker.jobs.boss,
+    worker.messages,
+    worker.config.messageSyncConcurrency,
+  );
   await registerMailboxDiscoveryWorker(
     worker.jobs.boss,
     worker.mailboxDiscovery,

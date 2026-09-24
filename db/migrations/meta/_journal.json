@@ -29,6 +29,20 @@
       "when": 1790229946658,
       "tag": "0003_living_iron_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790230828599,
+      "tag": "0004_robust_captain_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790231042793,
+      "tag": "0005_nosy_lightspeed",
+      "breakpoints": true
     }
   ]
 }

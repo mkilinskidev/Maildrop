@@ -11,6 +11,7 @@ import {
 import type { Database } from "../../../shared/infrastructure/database/database";
 import { mailAccounts } from "../../../shared/infrastructure/database/schema";
 import type { MailboxService } from "./mailbox-service";
+import type { MessageService } from "./message-service";
 
 function sanitizedDiscoveryError(error: unknown): string {
   if (error instanceof DisabledMailAccountError) return error.message;
@@ -24,6 +25,7 @@ export class MailboxDiscoveryService {
     private readonly accounts: AccountsService,
     private readonly provider: MailProvider,
     private readonly mailboxes: MailboxService,
+    private readonly messages?: MessageService,
   ) {}
 
   async run(accountId: string): Promise<void> {
@@ -54,6 +56,16 @@ export class MailboxDiscoveryService {
           updatedAt: observedAt,
         })
         .where(eq(mailAccounts.id, accountId));
+      if (this.messages) {
+        const selectable = await this.mailboxes.listForAccount(accountId);
+        await Promise.allSettled(
+          selectable
+            .filter((mailbox) => mailbox.selectable)
+            .map((mailbox) =>
+              this.messages!.requestRecentSync(accountId, mailbox.id),
+            ),
+        );
+      }
     } catch (error) {
       const failedAt = new Date();
       await this.database

@@ -142,6 +142,64 @@ button.danger {
   margin: 0.5rem 0;
   font-size: 0.85rem;
 }
+.mailbox-messages {
+  margin-top: 0.75rem;
+}
+.mailbox-messages > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.message-panel {
+  width: 100%;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #374151;
+  border-radius: 0.35rem;
+}
+.message-panel-header,
+.message-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.message-panel-header {
+  justify-content: space-between;
+}
+.message-panel-header h3,
+.message-panel-header p {
+  margin: 0 0 0.3rem;
+}
+.message-list {
+  display: grid;
+}
+.message-row {
+  padding: 0.6rem 0;
+  border-top: 1px solid #374151;
+}
+.message-row.unread {
+  font-weight: 700;
+}
+.unread-dot {
+  width: 0.8rem;
+  color: #60a5fa;
+}
+.message-sender {
+  width: 10rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.message-row time {
+  color: #9ca3af;
+  font-size: 0.85rem;
+}
 .account-card h2,
 .account-card p {
   margin: 0 0 0.45rem;

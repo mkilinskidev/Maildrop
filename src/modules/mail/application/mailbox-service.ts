@@ -29,6 +29,17 @@ export type MailboxView = Readonly<{
   missingSince: string | null;
   uidValidityChangedAt: string | null;
   uidValidityChangeCount: number;
+  recentSync: Readonly<{
+    status: "not_started" | "pending" | "running" | "success" | "failed";
+    requestedAt: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    error: string | null;
+    cutoff: string | null;
+    messageCount: number;
+    uidValidity: string | null;
+    lastSuccessfulAt: string | null;
+  }>;
 }>;
 
 function view(row: MailboxRow): MailboxView {
@@ -53,6 +64,17 @@ function view(row: MailboxRow): MailboxView {
     missingSince: row.missingSince?.toISOString() ?? null,
     uidValidityChangedAt: row.uidValidityChangedAt?.toISOString() ?? null,
     uidValidityChangeCount: row.uidValidityChangeCount,
+    recentSync: {
+      status: row.recentSyncStatus as MailboxView["recentSync"]["status"],
+      requestedAt: row.recentSyncRequestedAt?.toISOString() ?? null,
+      startedAt: row.recentSyncStartedAt?.toISOString() ?? null,
+      completedAt: row.recentSyncCompletedAt?.toISOString() ?? null,
+      error: row.recentSyncError,
+      cutoff: row.recentSyncCutoff?.toISOString() ?? null,
+      messageCount: row.recentSyncMessageCount,
+      uidValidity: row.recentSyncUidValidity?.toString() ?? null,
+      lastSuccessfulAt: row.lastSuccessfulRecentSyncAt?.toISOString() ?? null,
+    },
   };
 }
 

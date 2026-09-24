@@ -22,9 +22,14 @@ import {
   MailProviderOperationError,
   type MailProvider,
   type RemoteMailbox,
+  type RemoteMessageMetadata,
 } from "@/modules/accounts/domain/mail-provider";
 import { MailboxService } from "@/modules/mail/application/mailbox-service";
 import { MailboxDiscoveryService } from "@/modules/mail/application/mailbox-discovery-service";
+import {
+  MessageService,
+  MailboxNotSynchronizableError,
+} from "@/modules/mail/application/message-service";
 import { PgBossMailboxDiscoveryScheduler } from "@/modules/mail/infrastructure/mailbox-discovery-jobs";
 import { AesGcmSecretEncryption } from "@/shared/infrastructure/crypto/aes-gcm-secret-encryption";
 import { getValidSession } from "@/modules/auth/application/session-validation";
@@ -45,12 +50,18 @@ import {
   loginThrottle,
   mailAccounts,
   mailboxes,
+  messages,
+  mailboxMessages,
   rateLimit,
   session,
   user,
   verification,
 } from "@/shared/infrastructure/database/schema";
 import pino from "pino";
+
+const unusedRecentSync: MailProvider["synchronizeRecentMailbox"] = async () => {
+  throw new Error("Recent synchronization is not expected in this test.");
+};
 
 describe("Phase 0 PostgreSQL foundations", () => {
   let container: StartedTestContainer | undefined;
@@ -244,6 +255,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
 
   it("stores encrypted account credentials, preserves or replaces them deliberately, and never returns them", async () => {
     const provider: MailProvider = {
+      synchronizeRecentMailbox: unusedRecentSync,
       testConnection: async () => ({
         imap: { success: true },
         smtp: { success: true },
@@ -346,6 +358,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
 
   it("records separate connection outcomes and deletes an account", async () => {
     const provider: MailProvider = {
+      synchronizeRecentMailbox: unusedRecentSync,
       testConnection: async () => ({
         imap: { success: true },
         smtp: {
@@ -396,6 +409,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
   it("schedules initial discovery after account persistence", async () => {
     const scheduled: string[] = [];
     const provider: MailProvider = {
+      synchronizeRecentMailbox: unusedRecentSync,
       testConnection: async () => ({
         imap: { success: true },
         smtp: { success: true },
@@ -443,6 +457,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
 
   it("keeps active path identity idempotent but gives recreated paths new UUIDs", async () => {
     const provider: MailProvider = {
+      synchronizeRecentMailbox: unusedRecentSync,
       testConnection: async () => ({
         imap: { success: true },
         smtp: { success: true },
@@ -690,6 +705,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
     let attempt = 0;
     let providerCalls = 0;
     const provider: MailProvider = {
+      synchronizeRecentMailbox: unusedRecentSync,
       testConnection: async () => ({
         imap: { success: true },
         smtp: { success: true },
@@ -780,7 +796,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
 
     await accounts.setEnabled(id, false);
     await expect(discovery.run(id)).rejects.toThrow(
-      "Disabled mail accounts cannot run mailbox discovery",
+      "Disabled mail accounts cannot run provider work",
     );
     expect(providerCalls).toBe(2);
   });
@@ -848,5 +864,245 @@ describe("Phase 0 PostgreSQL foundations", () => {
       true,
     );
     expect(authorized).toBeNull();
+  });
+
+  it("persists recent metadata idempotently without Message-ID deduplication and handles UIDVALIDITY changes", async () => {
+    const encryption = new AesGcmSecretEncryption(
+      config.credentialsEncryption.activeKeyId,
+      config.credentialsEncryption.keys,
+    );
+    const baseMetadata = (
+      uid: string,
+      flags: readonly string[] = ["custom"],
+    ): RemoteMessageMetadata => ({
+      uid,
+      modseq: "9007199254740993",
+      internalDate: "2026-09-20T10:00:00.000Z",
+      size: "1234",
+      flags,
+      envelope: {
+        messageId: "same@example.test",
+        subject: "Metadata only",
+        from: [{ name: "Ania", address: "ania@example.test" }],
+        sender: [],
+        replyTo: [],
+        to: [],
+        cc: [],
+        bcc: [],
+      },
+      mimeStructure: {
+        part: "1",
+        type: "application/pdf",
+        disposition: "attachment",
+        filename: "invoice.pdf",
+        encoding: "base64",
+        size: "99",
+        contentId: null,
+        parameters: {},
+        dispositionParameters: { filename: "invoice.pdf" },
+        children: [],
+      },
+      hasAttachments: true,
+    });
+    let epoch = "10";
+    let providerCalls = 0;
+    let failAfterCommittedBatch = false;
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
+      synchronizeRecentMailbox: async (_account, request, sink) => {
+        providerCalls += 1;
+        expect(request.batchSize).toBe(config.messageFetchBatchSize);
+        await sink.selected(epoch);
+        await sink.batch([
+          baseMetadata(
+            "1",
+            providerCalls === 1
+              ? ["\\Seen", "custom"]
+              : ["\\Flagged", "custom"],
+          ),
+          baseMetadata("2"),
+        ]);
+        if (failAfterCommittedBatch) {
+          await sink.batch([baseMetadata("3")]);
+          throw new Error("simulated later batch failure");
+        }
+        return { uidValidity: epoch, messageCount: 2 };
+      },
+    };
+    const accounts = new AccountsService(db, encryption, provider);
+    const accountId = "00000000-0000-4000-8000-000000000031";
+    await accounts.create({
+      id: accountId,
+      displayName: "Messages",
+      email: "messages@example.test",
+      enabled: false,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "secret",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: true,
+      },
+    });
+    await db
+      .update(mailAccounts)
+      .set({ enabled: true })
+      .where(eq(mailAccounts.id, accountId));
+    const mailboxService = new MailboxService(db);
+    await mailboxService.reconcile(accountId, [
+      {
+        remotePath: "INBOX",
+        name: "INBOX",
+        delimiter: "/",
+        attributes: [],
+        selectable: true,
+        specialUse: ["\\Inbox"],
+        uidValidity: "10",
+      },
+    ]);
+    const mailbox = (await mailboxService.listForAccount(accountId))[0]!;
+    const service = new MessageService(db, accounts, provider, config);
+
+    await service.runRecentSync(accountId, mailbox.id);
+    expect(await db.select().from(messages)).toHaveLength(2);
+    expect(await db.select().from(mailboxMessages)).toHaveLength(2);
+    const firstPage = await service.list(accountId, mailbox.id, 1);
+    expect(firstPage.items).toHaveLength(1);
+    expect(firstPage.nextCursor).not.toBeNull();
+    const secondPage = await service.list(
+      accountId,
+      mailbox.id,
+      1,
+      firstPage.nextCursor!,
+    );
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
+    const listedMessages = (await service.list(accountId, mailbox.id)).items;
+    expect(listedMessages.every((item) => item.hasAttachments)).toBe(true);
+    expect(listedMessages.map((item) => item.seen).sort()).toEqual([
+      false,
+      true,
+    ]);
+
+    await service.runRecentSync(accountId, mailbox.id);
+    expect(await db.select().from(messages)).toHaveLength(2);
+    expect(await db.select().from(mailboxMessages)).toHaveLength(2);
+    const updatedPage = await service.list(accountId, mailbox.id);
+    expect(updatedPage.items.some((item) => item.flagged)).toBe(true);
+    expect(updatedPage.items.every((item) => !item.seen)).toBe(true);
+    const storedPlacements = await db.select().from(mailboxMessages);
+    expect(storedPlacements[0]?.modseq).toBe(9_007_199_254_740_993n);
+    expect(storedPlacements.flatMap((item) => item.flags)).toContain("custom");
+
+    failAfterCommittedBatch = true;
+    await expect(service.runRecentSync(accountId, mailbox.id)).rejects.toThrow(
+      "simulated later batch failure",
+    );
+    expect(await db.select().from(mailboxMessages)).toHaveLength(3);
+    expect((await mailboxService.listForAccount(accountId))[0]).toMatchObject({
+      recentSync: { status: "failed" },
+    });
+    failAfterCommittedBatch = false;
+
+    epoch = "11";
+    await service.runRecentSync(accountId, mailbox.id);
+    const currentPlacements = await db.select().from(mailboxMessages);
+    expect(currentPlacements).toHaveLength(2);
+    expect(currentPlacements.every((item) => item.uidValidity === 11n)).toBe(
+      true,
+    );
+    expect(await db.select().from(messages)).toHaveLength(5);
+    expect(providerCalls).toBe(4);
+    expect((await mailboxService.listForAccount(accountId))[0]).toMatchObject({
+      uidValidity: "11",
+      uidValidityChangeCount: 1,
+      recentSync: { status: "success", messageCount: 2 },
+    });
+    await db
+      .update(mailAccounts)
+      .set({ enabled: false })
+      .where(eq(mailAccounts.id, accountId));
+    await expect(service.runRecentSync(accountId, mailbox.id)).rejects.toThrow(
+      "Disabled mail accounts cannot run provider work",
+    );
+    expect(providerCalls).toBe(4);
+  });
+
+  it("rejects non-selectable recent sync before provider work", async () => {
+    let providerCalls = 0;
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
+      synchronizeRecentMailbox: async () => {
+        providerCalls += 1;
+        return { uidValidity: "1", messageCount: 0 };
+      },
+    };
+    const accounts = new AccountsService(
+      db,
+      new AesGcmSecretEncryption(
+        config.credentialsEncryption.activeKeyId,
+        config.credentialsEncryption.keys,
+      ),
+      provider,
+    );
+    const accountId = "00000000-0000-4000-8000-000000000032";
+    await accounts.create({
+      id: accountId,
+      displayName: "Container",
+      email: "container@example.test",
+      enabled: false,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "secret",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: true,
+      },
+    });
+    await db
+      .update(mailAccounts)
+      .set({ enabled: true })
+      .where(eq(mailAccounts.id, accountId));
+    const mailboxService = new MailboxService(db);
+    await mailboxService.reconcile(accountId, [
+      {
+        remotePath: "Folder",
+        name: "Folder",
+        delimiter: "/",
+        attributes: ["\\Noselect"],
+        selectable: false,
+        specialUse: [],
+      },
+    ]);
+    const mailbox = (await mailboxService.listForAccount(accountId))[0]!;
+    await expect(
+      new MessageService(db, accounts, provider, config).runRecentSync(
+        accountId,
+        mailbox.id,
+      ),
+    ).rejects.toBeInstanceOf(MailboxNotSynchronizableError);
+    expect(providerCalls).toBe(0);
   });
 });

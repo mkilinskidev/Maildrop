@@ -5,6 +5,8 @@ import { AesGcmSecretEncryption } from "@/shared/infrastructure/crypto/aes-gcm-s
 import { db } from "@/shared/infrastructure/database/runtime-database";
 import { MailboxService } from "@/modules/mail/application/mailbox-service";
 import { PgBossMailboxDiscoveryScheduler } from "@/modules/mail/infrastructure/mailbox-discovery-jobs";
+import { MessageService } from "@/modules/mail/application/message-service";
+import { PgBossRecentSyncScheduler } from "@/modules/mail/infrastructure/recent-sync-jobs";
 
 const config = getConfig();
 const encryption = new AesGcmSecretEncryption(
@@ -20,3 +22,10 @@ export const accountsService = new AccountsService(
 );
 
 export const mailboxService = new MailboxService(db);
+export const messageService = new MessageService(
+  db,
+  undefined,
+  undefined,
+  undefined,
+  new PgBossRecentSyncScheduler(config),
+);

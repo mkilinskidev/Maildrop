@@ -23,6 +23,21 @@ describe("configuration", () => {
     const config = parseConfig(validEnvironment);
     expect(config.environment).toBe("test");
     expect(config.databasePoolSize).toBe(10);
+    expect(config.initialSyncDays).toBe(30);
+    expect(config.messageFetchBatchSize).toBe(150);
+    expect(config.messageSyncConcurrency).toBe(2);
+  });
+
+  it("validates recent synchronization bounds", () => {
+    expect(() =>
+      parseConfig({ ...validEnvironment, MAILDOCK_INITIAL_SYNC_DAYS: "0" }),
+    ).toThrow(/MAILDOCK_INITIAL_SYNC_DAYS/);
+    expect(() =>
+      parseConfig({
+        ...validEnvironment,
+        MAILDOCK_MESSAGE_FETCH_BATCH_SIZE: "501",
+      }),
+    ).toThrow(/MAILDOCK_MESSAGE_FETCH_BATCH_SIZE/);
   });
 
   it("fails startup with useful field names when required configuration is invalid", () => {
