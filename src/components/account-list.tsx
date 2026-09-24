@@ -2,18 +2,69 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { MailAccountView } from "@/modules/accounts/application/accounts-service";
+import type { MailboxView } from "@/modules/mail/application/mailbox-service";
 
-export function AccountList({ accounts }: { accounts: MailAccountView[] }) {
+function count(value: string | null): string {
+  return value === null ? "" : new Intl.NumberFormat().format(BigInt(value));
+}
+
+function MailboxHierarchy({ mailboxes }: { mailboxes: MailboxView[] }) {
+  if (mailboxes.length === 0) return null;
+  return (
+    <div className="mailbox-tree" aria-label="Discovered mailboxes">
+      {mailboxes.map((mailbox) => {
+        const depth = mailbox.delimiter
+          ? Math.max(0, mailbox.remotePath.split(mailbox.delimiter).length - 1)
+          : 0;
+        return (
+          <div
+            className={`mailbox-row${mailbox.selectable ? "" : " mailbox-container"}`}
+            key={mailbox.id}
+            style={{ paddingInlineStart: `${depth * 1.25}rem` }}
+          >
+            <span>
+              {mailbox.name}
+              {!mailbox.selectable ? " (container)" : ""}
+            </span>
+            <span>{count(mailbox.messageCount)}</span>
+            <span>
+              {mailbox.unseenCount === null
+                ? ""
+                : `${count(mailbox.unseenCount)} unread`}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function AccountList({
+  accounts,
+  mailboxesByAccount,
+}: {
+  accounts: MailAccountView[];
+  mailboxesByAccount: Record<string, MailboxView[]>;
+}) {
   const router = useRouter();
   const [pending, setPending] = useState<string>();
   const [error, setError] = useState<string>();
 
+  const discoveryInProgress = accounts.some((account) =>
+    ["pending", "running"].includes(account.mailboxDiscovery.status),
+  );
+  useEffect(() => {
+    if (!discoveryInProgress) return;
+    const timer = window.setInterval(() => router.refresh(), 3000);
+    return () => window.clearInterval(timer);
+  }, [discoveryInProgress, router]);
+
   async function mutate(
     id: string,
-    action: "test" | "toggle" | "delete",
+    action: "test" | "toggle" | "delete" | "discover",
     enabled?: boolean,
   ) {
     if (
@@ -26,7 +77,9 @@ export function AccountList({ accounts }: { accounts: MailAccountView[] }) {
     const response = await fetch(
       action === "toggle"
         ? `/api/accounts/${id}/enabled`
-        : `/api/accounts/${id}${action === "test" ? "/test" : ""}`,
+        : action === "discover"
+          ? `/api/accounts/${id}/mailboxes/discover`
+          : `/api/accounts/${id}${action === "test" ? "/test" : ""}`,
       {
         method:
           action === "toggle"
@@ -78,7 +131,7 @@ export function AccountList({ accounts }: { accounts: MailAccountView[] }) {
       <div className="account-list">
         {accounts.map((account) => (
           <article className="account-card" key={account.id}>
-            <div>
+            <div className="account-details">
               <h2>{account.displayName}</h2>
               <p>{account.email}</p>
               <p className="muted">
@@ -103,6 +156,45 @@ export function AccountList({ accounts }: { accounts: MailAccountView[] }) {
               {account.smtpResult.error ? (
                 <p className="error">SMTP: {account.smtpResult.error}</p>
               ) : null}
+              <p className="muted">
+                Mailboxes: {mailboxesByAccount[account.id]?.length ?? 0} ·{" "}
+                {account.mailboxDiscovery.status === "running" ||
+                account.mailboxDiscovery.status === "pending"
+                  ? "Discovering mailboxes…"
+                  : account.mailboxDiscovery.status === "success"
+                    ? `Last discovered ${new Date(account.mailboxDiscovery.lastSuccessfulAt!).toLocaleString()}`
+                    : account.mailboxDiscovery.status === "failed"
+                      ? "Discovery failed"
+                      : "Not yet discovered"}
+              </p>
+              {account.mailboxDiscovery.error ? (
+                <p className="error">{account.mailboxDiscovery.error}</p>
+              ) : null}
+              <MailboxHierarchy
+                mailboxes={mailboxesByAccount[account.id] ?? []}
+              />
+              {account.mailboxDiscovery.status === "success" ? (
+                <details className="mailbox-diagnostics">
+                  <summary>Discovery diagnostics</summary>
+                  <p>
+                    Capabilities:{" "}
+                    {account.mailboxDiscovery.capabilities.join(", ") ||
+                      "None reported"}
+                  </p>
+                  {(mailboxesByAccount[account.id] ?? []).map((mailbox) => (
+                    <p key={mailbox.id}>
+                      <code>{mailbox.remotePath}</code> · delimiter{" "}
+                      <code>{mailbox.delimiter ?? "none"}</code> · attributes{" "}
+                      {mailbox.attributes.join(", ") || "none"} · special-use{" "}
+                      {mailbox.specialUse.join(", ") || "none"} · selectable{" "}
+                      {String(mailbox.selectable)} · UIDVALIDITY{" "}
+                      {mailbox.uidValidity ?? "n/a"} · UIDNEXT{" "}
+                      {mailbox.uidNext ?? "n/a"} · HIGHESTMODSEQ{" "}
+                      {mailbox.highestModseq ?? "n/a"}
+                    </p>
+                  ))}
+                </details>
+              ) : null}
             </div>
             <div className="actions">
               <Link
@@ -116,6 +208,12 @@ export function AccountList({ accounts }: { accounts: MailAccountView[] }) {
                 onClick={() => mutate(account.id, "test")}
               >
                 Test connection
+              </button>
+              <button
+                disabled={pending === account.id || !account.enabled}
+                onClick={() => mutate(account.id, "discover")}
+              >
+                Refresh mailboxes
               </button>
               <button
                 className="secondary"

@@ -182,6 +182,21 @@ export const mailAccounts = pgTable(
       "last_successful_connection_test_at",
       { withTimezone: true },
     ),
+    mailboxDiscoveryStatus: text("mailbox_discovery_status")
+      .default("not_started")
+      .notNull(),
+    mailboxDiscoveryError: text("mailbox_discovery_error"),
+    mailboxDiscoveryRequestedAt: timestamp("mailbox_discovery_requested_at", {
+      withTimezone: true,
+    }),
+    mailboxDiscoveryStartedAt: timestamp("mailbox_discovery_started_at", {
+      withTimezone: true,
+    }),
+    lastSuccessfulMailboxDiscoveryAt: timestamp(
+      "last_successful_mailbox_discovery_at",
+      { withTimezone: true },
+    ),
+    imapCapabilities: text("imap_capabilities").array().default([]).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -223,11 +238,72 @@ export const mailAccounts = pgTable(
       sql`${table.smtpStatus} in ('untested', 'success', 'error')`,
     ),
     check(
+      "mail_accounts_mailbox_discovery_status",
+      sql`${table.mailboxDiscoveryStatus} in ('not_started', 'pending', 'running', 'success', 'failed')`,
+    ),
+    check(
       "mail_accounts_smtp_credentials",
       sql`(${table.smtpUsesImapCredentials} and ${table.smtpUsername} is null and ${table.smtpPassword} is null) or (not ${table.smtpUsesImapCredentials} and ${table.smtpUsername} is not null and ${table.smtpPassword} is not null)`,
     ),
     index("mail_accounts_enabled_idx").on(table.enabled),
     index("mail_accounts_email_idx").on(table.email),
+  ],
+);
+
+export const mailboxes = pgTable(
+  "mailboxes",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => mailAccounts.id, { onDelete: "cascade" }),
+    remotePath: text("remote_path").notNull(),
+    name: text("name").notNull(),
+    delimiter: text("delimiter"),
+    attributes: text("attributes").array().default([]).notNull(),
+    specialUse: text("special_use").array().default([]).notNull(),
+    selectable: boolean("selectable").notNull(),
+    subscribed: boolean("subscribed"),
+    providerMailboxId: text("provider_mailbox_id"),
+    uidValidity: bigint("uid_validity", { mode: "bigint" }),
+    uidNext: bigint("uid_next", { mode: "bigint" }),
+    highestModseq: bigint("highest_modseq", { mode: "bigint" }),
+    reportedMessageCount: bigint("reported_message_count", { mode: "bigint" }),
+    reportedUnseenCount: bigint("reported_unseen_count", { mode: "bigint" }),
+    lifecycleStatus: text("lifecycle_status").default("active").notNull(),
+    firstDiscoveredAt: timestamp("first_discovered_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastDiscoveredAt: timestamp("last_discovered_at", {
+      withTimezone: true,
+    }).notNull(),
+    missingSince: timestamp("missing_since", { withTimezone: true }),
+    uidValidityChangedAt: timestamp("uid_validity_changed_at", {
+      withTimezone: true,
+    }),
+    uidValidityChangeCount: integer("uid_validity_change_count")
+      .default(0)
+      .notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    check(
+      "mailboxes_lifecycle_status",
+      sql`${table.lifecycleStatus} in ('active', 'missing')`,
+    ),
+    index("mailboxes_account_idx").on(table.accountId),
+    index("mailboxes_account_path_idx").on(table.accountId, table.remotePath),
+    uniqueIndex("mailboxes_account_provider_id_unique")
+      .on(table.accountId, table.providerMailboxId)
+      .where(sql`${table.providerMailboxId} is not null`),
+    uniqueIndex("mailboxes_account_path_without_provider_id_unique")
+      .on(table.accountId, table.remotePath)
+      .where(sql`${table.providerMailboxId} is null`),
   ],
 );
 
@@ -244,6 +320,17 @@ export const accountRelations = relations(account, ({ one }) => ({
   user: one(user, { fields: [account.userId], references: [user.id] }),
 }));
 
+export const mailAccountRelations = relations(mailAccounts, ({ many }) => ({
+  mailboxes: many(mailboxes),
+}));
+
+export const mailboxRelations = relations(mailboxes, ({ one }) => ({
+  account: one(mailAccounts, {
+    fields: [mailboxes.accountId],
+    references: [mailAccounts.id],
+  }),
+}));
+
 export const schema = {
   instanceState,
   user,
@@ -253,7 +340,10 @@ export const schema = {
   rateLimit,
   loginThrottle,
   mailAccounts,
+  mailboxes,
   userRelations,
   sessionRelations,
   accountRelations,
+  mailAccountRelations,
+  mailboxRelations,
 };

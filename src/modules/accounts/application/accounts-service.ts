@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -7,20 +7,29 @@ import {
   updateAccountInputSchema,
   type CreateAccountInput,
   type UpdateAccountInput,
-} from "@/modules/accounts/domain/account";
+} from "../domain/account";
 import type {
   ConnectionReport,
   MailProvider,
   ProviderAccount,
-} from "@/modules/accounts/domain/mail-provider";
-import type { SecretEncryption } from "@/shared/application/secret-encryption";
-import type { Database } from "@/shared/infrastructure/database/database";
-import { mailAccounts } from "@/shared/infrastructure/database/schema";
+  ProviderImapAccount,
+} from "../domain/mail-provider";
+import type { SecretEncryption } from "../../../shared/application/secret-encryption";
+import type { MailboxDiscoveryScheduler } from "./mailbox-discovery-scheduler";
+import type { Database } from "../../../shared/infrastructure/database/database";
+import { mailAccounts } from "../../../shared/infrastructure/database/schema";
 
 export class MailAccountNotFoundError extends Error {
   constructor() {
     super("Mail account not found.");
     this.name = "MailAccountNotFoundError";
+  }
+}
+
+export class DisabledMailAccountError extends Error {
+  constructor() {
+    super("Disabled mail accounts cannot run mailbox discovery.");
+    this.name = "DisabledMailAccountError";
   }
 }
 
@@ -57,6 +66,14 @@ export type MailAccountView = Readonly<{
     error?: string;
   }>;
   lastSuccessfulConnectionTestAt: string | null;
+  mailboxDiscovery: Readonly<{
+    status: "not_started" | "pending" | "running" | "success" | "failed";
+    error: string | null;
+    requestedAt: string | null;
+    startedAt: string | null;
+    lastSuccessfulAt: string | null;
+    capabilities: readonly string[];
+  }>;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -95,6 +112,16 @@ function toView(row: AccountRow): MailAccountView {
     },
     lastSuccessfulConnectionTestAt:
       row.lastSuccessfulConnectionTestAt?.toISOString() ?? null,
+    mailboxDiscovery: {
+      status:
+        row.mailboxDiscoveryStatus as MailAccountView["mailboxDiscovery"]["status"],
+      error: row.mailboxDiscoveryError,
+      requestedAt: row.mailboxDiscoveryRequestedAt?.toISOString() ?? null,
+      startedAt: row.mailboxDiscoveryStartedAt?.toISOString() ?? null,
+      lastSuccessfulAt:
+        row.lastSuccessfulMailboxDiscoveryAt?.toISOString() ?? null,
+      capabilities: row.imapCapabilities,
+    },
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -105,6 +132,7 @@ export class AccountsService {
     private readonly database: Database,
     private readonly encryption: SecretEncryption,
     private readonly provider: MailProvider,
+    private readonly discoveryScheduler?: MailboxDiscoveryScheduler,
   ) {}
 
   async list(): Promise<MailAccountView[]> {
@@ -156,7 +184,8 @@ export class AccountsService {
       })
       .returning();
     if (!created) throw new Error("Mail account was not created.");
-    return toView(created);
+    if (created.enabled) await this.scheduleDiscovery(created.id);
+    return created.enabled ? this.get(created.id) : toView(created);
   }
 
   async update(
@@ -216,7 +245,8 @@ export class AccountsService {
       .where(eq(mailAccounts.id, id))
       .returning();
     if (!updated) throw new MailAccountNotFoundError();
-    return toView(updated);
+    if (updated.enabled) await this.scheduleDiscovery(updated.id);
+    return updated.enabled ? this.get(updated.id) : toView(updated);
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<MailAccountView> {
@@ -226,7 +256,8 @@ export class AccountsService {
       .where(eq(mailAccounts.id, id))
       .returning();
     if (!updated) throw new MailAccountNotFoundError();
-    return toView(updated);
+    if (enabled) await this.scheduleDiscovery(id);
+    return enabled ? this.get(id) : toView(updated);
   }
 
   async delete(id: string): Promise<void> {
@@ -271,6 +302,33 @@ export class AccountsService {
     return report;
   }
 
+  async requestMailboxDiscovery(id: string): Promise<MailAccountView> {
+    const row = await this.getRow(id);
+    if (!row.enabled) throw new DisabledMailAccountError();
+    await this.scheduleDiscovery(id);
+    return this.get(id);
+  }
+
+  async getProviderImapAccountForWork(
+    id: string,
+  ): Promise<ProviderImapAccount> {
+    const row = await this.getRow(id);
+    if (!row.enabled) throw new DisabledMailAccountError();
+    return {
+      accountId: row.id,
+      imap: {
+        host: row.imapHost,
+        port: row.imapPort,
+        security: row.imapSecurity as "tls" | "starttls",
+        username: row.imapUsername,
+        password: this.encryption.decrypt(
+          row.imapPassword,
+          accountCredentialContext(row.id, "imap"),
+        ),
+      },
+    };
+  }
+
   private async getRow(id: string): Promise<AccountRow> {
     const [row] = await this.database
       .select()
@@ -299,6 +357,49 @@ export class AccountsService {
           : input.smtp.password!,
       },
     };
+  }
+
+  private async scheduleDiscovery(id: string): Promise<void> {
+    if (!this.discoveryScheduler) return;
+    const now = new Date();
+    try {
+      const scheduled = await this.discoveryScheduler.schedule(id);
+      if (scheduled) {
+        await this.database
+          .update(mailAccounts)
+          .set({
+            mailboxDiscoveryStatus: "pending",
+            mailboxDiscoveryError: null,
+            mailboxDiscoveryRequestedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(mailAccounts.id, id));
+      } else {
+        await this.database
+          .update(mailAccounts)
+          .set({
+            mailboxDiscoveryStatus: "pending",
+            mailboxDiscoveryError: null,
+            mailboxDiscoveryRequestedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(mailAccounts.id, id),
+              eq(mailAccounts.mailboxDiscoveryStatus, "failed"),
+            ),
+          );
+      }
+    } catch {
+      await this.database
+        .update(mailAccounts)
+        .set({
+          mailboxDiscoveryStatus: "failed",
+          mailboxDiscoveryError: "Mailbox discovery could not be scheduled.",
+          updatedAt: now,
+        })
+        .where(eq(mailAccounts.id, id));
+    }
   }
 
   private providerInputFromRow(row: AccountRow): ProviderAccount {

@@ -3,10 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   ImapSmtpMailProvider,
   imapOptions,
+  normalizeCapabilities,
+  normalizeMailbox,
   smtpOptions,
   type ProtocolClientFactories,
 } from "@/modules/accounts/infrastructure/imap-smtp-mail-provider";
 import type { ProviderAccount } from "@/modules/accounts/domain/mail-provider";
+import type { ListResponse } from "imapflow";
 
 const account: ProviderAccount = {
   accountId: "00000000-0000-4000-8000-000000000001",
@@ -33,9 +36,12 @@ function factories(input?: {
   const state = { imapClosed: 0, smtpClosed: 0 };
   const value: ProtocolClientFactories = {
     createImap: () => ({
+      capabilities: new Map(),
+      enabled: new Set(),
       connect: async () => {
         if (input?.imapError) throw input.imapError;
       },
+      list: async () => [],
       logout: async () => undefined,
       close: () => {
         state.imapClosed += 1;
@@ -112,5 +118,130 @@ describe("IMAP/SMTP connection provider", () => {
       ignoreTLS: false,
       tls: { rejectUnauthorized: true },
     });
+  });
+});
+
+function listed(
+  input: Partial<ListResponse> & Pick<ListResponse, "path" | "name">,
+): ListResponse {
+  return {
+    pathAsListed: input.path,
+    delimiter: "/",
+    parent: [],
+    parentPath: "",
+    flags: new Set(),
+    listed: true,
+    subscribed: true,
+    ...input,
+  };
+}
+
+describe("IMAP mailbox normalization", () => {
+  it("normalizes INBOX and status observations without using Recent", () => {
+    expect(
+      normalizeMailbox(
+        listed({
+          path: "INBOX",
+          name: "INBOX",
+          flags: new Set(["\\HasNoChildren"]),
+          status: {
+            path: "INBOX",
+            messages: 1284,
+            unseen: 12,
+            recent: 99,
+            uidNext: 2000,
+            uidValidity: 4294967295n,
+          },
+        }),
+      ),
+    ).toEqual({
+      remotePath: "INBOX",
+      name: "INBOX",
+      delimiter: "/",
+      attributes: ["\\HasNoChildren"],
+      selectable: true,
+      specialUse: ["\\Inbox"],
+      messageCount: "1284",
+      unseenCount: "12",
+      uidValidity: "4294967295",
+      uidNext: "2000",
+    });
+  });
+
+  it("preserves a non-slash hierarchy delimiter, Noselect, and unknown attributes", () => {
+    const result = normalizeMailbox(
+      listed({
+        path: "Archive.2025",
+        name: "2025",
+        delimiter: ".",
+        flags: new Set(["\\Noselect", "\\VendorExtension"]),
+        subscribed: false,
+      }),
+    );
+    expect(result).toMatchObject({
+      remotePath: "Archive.2025",
+      delimiter: ".",
+      selectable: false,
+      attributes: ["\\Noselect", "\\VendorExtension"],
+      subscribed: false,
+    });
+  });
+
+  it("keeps server SPECIAL-USE and ignores name-derived folder heuristics", () => {
+    expect(
+      normalizeMailbox(
+        listed({
+          path: "Localized",
+          name: "Localized",
+          flags: new Set(["\\Sent", "\\XCustom"]),
+          specialUse: "\\Sent",
+          specialUseSource: "extension",
+        }),
+      ).specialUse,
+    ).toEqual(["\\Sent"]);
+    expect(
+      normalizeMailbox(
+        listed({
+          path: "Sent by name only",
+          name: "Sent by name only",
+          specialUse: "\\Sent",
+          specialUseSource: "name",
+        }),
+      ).specialUse,
+    ).toEqual([]);
+  });
+
+  it("allows missing status and preserves large MODSEQ values exactly", () => {
+    expect(
+      normalizeMailbox(listed({ path: "Empty", name: "Empty" })),
+    ).not.toHaveProperty("uidValidity");
+    expect(
+      normalizeMailbox(
+        listed({
+          path: "Large",
+          name: "Large",
+          status: {
+            path: "Large",
+            highestModseq: 18_446_744_073_709_551_615n,
+          },
+        }),
+      ).highestModseq,
+    ).toBe("18446744073709551615");
+  });
+
+  it("captures only synchronization-relevant capabilities", () => {
+    expect(
+      normalizeCapabilities(
+        ["IMAP4rev2", "IDLE", "MOVE", "AUTH=PLAIN", "LIST-STATUS"],
+        ["CONDSTORE", "QRESYNC"],
+      ),
+    ).toEqual([
+      "IMAP4REV2",
+      "IDLE",
+      "CONDSTORE",
+      "QRESYNC",
+      "MOVE",
+      "LIST-STATUS",
+    ]);
   });
 });

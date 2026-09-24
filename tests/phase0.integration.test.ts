@@ -17,7 +17,14 @@ import {
 } from "@/modules/auth/application/instance-auth";
 import { checkOwnerApiAccess } from "@/modules/auth/application/api-access-check";
 import { AccountsService } from "@/modules/accounts/application/accounts-service";
-import type { MailProvider } from "@/modules/accounts/domain/mail-provider";
+import {
+  MailProviderOperationError,
+  type MailProvider,
+  type RemoteMailbox,
+} from "@/modules/accounts/domain/mail-provider";
+import { MailboxService } from "@/modules/mail/application/mailbox-service";
+import { MailboxDiscoveryService } from "@/modules/mail/application/mailbox-discovery-service";
+import { PgBossMailboxDiscoveryScheduler } from "@/modules/mail/infrastructure/mailbox-discovery-jobs";
 import { AesGcmSecretEncryption } from "@/shared/infrastructure/crypto/aes-gcm-secret-encryption";
 import { getValidSession } from "@/modules/auth/application/session-validation";
 import { createAuth } from "@/modules/auth/infrastructure/auth-factory";
@@ -239,6 +246,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
         imap: { success: true },
         smtp: { success: true },
       }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
     };
     const encryption = new AesGcmSecretEncryption(
       config.credentialsEncryption.activeKeyId,
@@ -344,6 +352,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
           message: "SMTP authentication was rejected.",
         },
       }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
     };
     const service = new AccountsService(
       db,
@@ -380,6 +389,290 @@ describe("Phase 0 PostgreSQL foundations", () => {
     expect((await service.get(id)).connectionStatus).toBe("error");
     await service.delete(id);
     await expect(service.get(id)).rejects.toThrow("Mail account not found");
+  });
+
+  it("schedules initial discovery after account persistence", async () => {
+    const scheduled: string[] = [];
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
+    };
+    const service = new AccountsService(
+      db,
+      new AesGcmSecretEncryption(
+        config.credentialsEncryption.activeKeyId,
+        config.credentialsEncryption.keys,
+      ),
+      provider,
+      {
+        schedule: async (accountId) => {
+          scheduled.push(accountId);
+          return true;
+        },
+      },
+    );
+    const id = "00000000-0000-4000-8000-000000000020";
+    const created = await service.create({
+      id,
+      displayName: "Scheduled",
+      email: "scheduled@example.test",
+      enabled: true,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "secret",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: true,
+      },
+    });
+    expect(scheduled).toEqual([id]);
+    expect(created.mailboxDiscovery.status).toBe("pending");
+  });
+
+  it("reconciles mailbox identity, lifecycle, metadata, and UIDVALIDITY epochs", async () => {
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+      listMailboxes: async () => ({ mailboxes: [], capabilities: [] }),
+    };
+    const accounts = new AccountsService(
+      db,
+      new AesGcmSecretEncryption(
+        config.credentialsEncryption.activeKeyId,
+        config.credentialsEncryption.keys,
+      ),
+      provider,
+    );
+    const createAccount = async (id: string, email: string) =>
+      accounts.create({
+        id,
+        displayName: email,
+        email,
+        enabled: false,
+        providerType: "imap_smtp",
+        imap: {
+          host: "imap.example.test",
+          port: 993,
+          security: "tls",
+          username: "owner",
+          password: "secret",
+        },
+        smtp: {
+          host: "smtp.example.test",
+          port: 465,
+          security: "tls",
+          useImapCredentials: true,
+        },
+      });
+    const firstAccount = "00000000-0000-4000-8000-000000000021";
+    const secondAccount = "00000000-0000-4000-8000-000000000022";
+    await createAccount(firstAccount, "one@example.test");
+    await createAccount(secondAccount, "two@example.test");
+    const service = new MailboxService(db);
+    const remote = (
+      path: string,
+      overrides: Partial<RemoteMailbox> = {},
+    ): RemoteMailbox => ({
+      remotePath: path,
+      name: path.split(".").at(-1)!,
+      delimiter: ".",
+      attributes: [],
+      selectable: true,
+      specialUse: [],
+      ...overrides,
+    });
+
+    await service.reconcile(firstAccount, [
+      remote("INBOX", {
+        specialUse: ["\\Inbox"],
+        uidValidity: "10",
+        messageCount: "5",
+      }),
+      remote("Archive.2025", { messageCount: "3" }),
+      remote("Stable", { providerMailboxId: "object-1" }),
+      remote("OldPath"),
+    ]);
+    const first = await service.listForAccount(firstAccount, true);
+    expect(first).toHaveLength(4);
+    const inboxId = first.find((item) => item.remotePath === "INBOX")!.id;
+    const stableId = first.find((item) => item.remotePath === "Stable")!.id;
+
+    await service.reconcile(firstAccount, [
+      remote("INBOX", {
+        specialUse: ["\\Inbox"],
+        uidValidity: "11",
+        messageCount: "8",
+      }),
+      remote("Archive.2026", { messageCount: "4" }),
+      remote("RenamedStable", { providerMailboxId: "object-1" }),
+      remote("NewPath"),
+    ]);
+    const second = await service.listForAccount(firstAccount, true);
+    expect(second.find((item) => item.remotePath === "INBOX")).toMatchObject({
+      id: inboxId,
+      messageCount: "8",
+      uidValidity: "11",
+      uidValidityChangeCount: 1,
+    });
+    expect(second.find((item) => item.remotePath === "RenamedStable")?.id).toBe(
+      stableId,
+    );
+    expect(
+      second.find((item) => item.remotePath === "Archive.2025")
+        ?.lifecycleStatus,
+    ).toBe("missing");
+    expect(
+      second.find((item) => item.remotePath === "OldPath")?.lifecycleStatus,
+    ).toBe("missing");
+    expect(second.find((item) => item.remotePath === "NewPath")?.id).not.toBe(
+      first.find((item) => item.remotePath === "OldPath")?.id,
+    );
+
+    await service.reconcile(firstAccount, [
+      remote("INBOX", { uidValidity: "11" }),
+      remote("Archive.2025"),
+      remote("RenamedStable", { providerMailboxId: "object-1" }),
+      remote("NewPath"),
+    ]);
+    expect(
+      (await service.listForAccount(firstAccount, true)).find(
+        (item) => item.remotePath === "Archive.2025",
+      )?.lifecycleStatus,
+    ).toBe("active");
+
+    await service.reconcile(secondAccount, [remote("INBOX")]);
+    expect(await service.listForAccount(secondAccount)).toHaveLength(1);
+    expect(await service.listForAccount(firstAccount)).toHaveLength(4);
+
+    await service.reconcile(firstAccount, [
+      remote("INBOX", { uidValidity: "11" }),
+      remote("Archive.2025"),
+      remote("RenamedStable", { providerMailboxId: "object-1" }),
+      remote("NewPath"),
+    ]);
+    expect(await service.listForAccount(firstAccount, true)).toHaveLength(6);
+  });
+
+  it("retains mailbox data after failure, rejects disabled work, and can retry", async () => {
+    let attempt = 0;
+    let providerCalls = 0;
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+      listMailboxes: async () => {
+        providerCalls += 1;
+        attempt += 1;
+        if (attempt === 1) {
+          throw new MailProviderOperationError({
+            success: false,
+            category: "connection_timeout",
+            message: "The connection timed out.",
+          });
+        }
+        return {
+          capabilities: ["IDLE"],
+          mailboxes: [
+            {
+              remotePath: "INBOX",
+              name: "INBOX",
+              delimiter: "/",
+              attributes: [],
+              selectable: true,
+              specialUse: ["\\Inbox"],
+            },
+          ],
+        };
+      },
+    };
+    const accounts = new AccountsService(
+      db,
+      new AesGcmSecretEncryption(
+        config.credentialsEncryption.activeKeyId,
+        config.credentialsEncryption.keys,
+      ),
+      provider,
+    );
+    const id = "00000000-0000-4000-8000-000000000023";
+    await accounts.create({
+      id,
+      displayName: "Retry",
+      email: "retry@example.test",
+      enabled: true,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "secret",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: true,
+      },
+    });
+    const mailboxService = new MailboxService(db);
+    await mailboxService.reconcile(id, [
+      {
+        remotePath: "Known",
+        name: "Known",
+        delimiter: "/",
+        attributes: [],
+        selectable: true,
+        specialUse: [],
+      },
+    ]);
+    const discovery = new MailboxDiscoveryService(
+      db,
+      accounts,
+      provider,
+      mailboxService,
+    );
+    await expect(discovery.run(id)).rejects.toThrow();
+    expect(await mailboxService.listForAccount(id)).toHaveLength(1);
+    expect((await accounts.get(id)).mailboxDiscovery).toMatchObject({
+      status: "failed",
+      error: "The connection timed out.",
+    });
+    await discovery.run(id);
+    expect(await mailboxService.listForAccount(id)).toHaveLength(1);
+    expect((await accounts.get(id)).mailboxDiscovery).toMatchObject({
+      status: "success",
+      capabilities: ["IDLE"],
+    });
+
+    await accounts.setEnabled(id, false);
+    await expect(discovery.run(id)).rejects.toThrow(
+      "Disabled mail accounts cannot run mailbox discovery",
+    );
+    expect(providerCalls).toBe(2);
+  });
+
+  it("deduplicates queued discovery requests per account", async () => {
+    const scheduler = new PgBossMailboxDiscoveryScheduler(config);
+    try {
+      const id = "00000000-0000-4000-8000-000000000024";
+      expect(await scheduler.schedule(id)).toBe(true);
+      expect(await scheduler.schedule(id)).toBe(false);
+    } finally {
+      await scheduler.stop();
+    }
   });
 
   it("requires an authenticated owner and valid origin for deletion mutations", async () => {

@@ -6,7 +6,7 @@ import {
   CredentialUnavailableError,
   type EncryptedEnvelope,
   type SecretEncryption,
-} from "@/shared/application/secret-encryption";
+} from "../../application/secret-encryption";
 
 const ALGORITHM = "aes-256-gcm";
 const AUTH_TAG_LENGTH = 16;

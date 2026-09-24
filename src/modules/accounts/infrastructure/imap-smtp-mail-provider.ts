@@ -1,21 +1,38 @@
-import { ImapFlow, type ImapFlowOptions } from "imapflow";
+import { ImapFlow, type ImapFlowOptions, type ListResponse } from "imapflow";
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
-import type {
-  ConnectionFailureCategory,
-  ConnectionReport,
-  MailProvider,
-  ProtocolConnectionResult,
-  ProviderAccount,
-  ProviderConnection,
-} from "@/modules/accounts/domain/mail-provider";
+import {
+  MailProviderOperationError,
+  relevantImapCapabilities,
+  type ConnectionFailureCategory,
+  type ConnectionReport,
+  type MailboxDiscoveryResult,
+  type MailProvider,
+  type ProtocolConnectionResult,
+  type ProviderAccount,
+  type ProviderConnection,
+  type ProviderImapAccount,
+  type RemoteMailbox,
+  type RelevantImapCapability,
+} from "../domain/mail-provider";
 
 const CONNECTION_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 15_000;
 
 type ImapClient = {
   connect(): Promise<unknown>;
+  list(options?: {
+    statusQuery?: {
+      messages?: boolean;
+      unseen?: boolean;
+      uidNext?: boolean;
+      uidValidity?: boolean;
+      highestModseq?: boolean;
+    };
+  }): Promise<ListResponse[]>;
+  capabilities: Map<string, boolean | number>;
+  enabled: Set<string>;
   logout(): Promise<unknown>;
   close(): void;
 };
@@ -128,6 +145,77 @@ function sanitizeError(
   return { success: false, category, message: descriptions[category] };
 }
 
+const STANDARD_SPECIAL_USE = new Set([
+  "\\All",
+  "\\Archive",
+  "\\Drafts",
+  "\\Flagged",
+  "\\Junk",
+  "\\Sent",
+  "\\Trash",
+]);
+
+function decimal(value: number | bigint | undefined): string | undefined {
+  return value === undefined ? undefined : value.toString(10);
+}
+
+export function normalizeMailbox(mailbox: ListResponse): RemoteMailbox {
+  const attributes = [...mailbox.flags].sort();
+  const specialUse = attributes.filter((attribute) =>
+    STANDARD_SPECIAL_USE.has(attribute),
+  );
+  // INBOX is protocol-defined by its case-insensitive path, not guessed from a
+  // localized display name. Other ImapFlow name heuristics are deliberately ignored.
+  if (mailbox.path.toUpperCase() === "INBOX") specialUse.unshift("\\Inbox");
+  if (
+    mailbox.specialUseSource === "extension" &&
+    mailbox.specialUse &&
+    !specialUse.includes(mailbox.specialUse)
+  ) {
+    specialUse.push(mailbox.specialUse);
+  }
+
+  return {
+    remotePath: mailbox.path,
+    name: mailbox.name,
+    delimiter: mailbox.delimiter || null,
+    attributes,
+    selectable:
+      !mailbox.flags.has("\\Noselect") && !mailbox.flags.has("\\NonExistent"),
+    specialUse,
+    // ImapFlow intentionally reports true when no subscription source answers,
+    // so only a reported false can be represented as reliable here.
+    ...(mailbox.subscribed === false ? { subscribed: false } : {}),
+    ...(mailbox.status?.messages === undefined
+      ? {}
+      : { messageCount: decimal(mailbox.status.messages) }),
+    ...(mailbox.status?.unseen === undefined
+      ? {}
+      : { unseenCount: decimal(mailbox.status.unseen) }),
+    ...(mailbox.status?.uidValidity === undefined
+      ? {}
+      : { uidValidity: decimal(mailbox.status.uidValidity) }),
+    ...(mailbox.status?.uidNext === undefined
+      ? {}
+      : { uidNext: decimal(mailbox.status.uidNext) }),
+    ...(mailbox.status?.highestModseq === undefined
+      ? {}
+      : { highestModseq: decimal(mailbox.status.highestModseq) }),
+  };
+}
+
+export function normalizeCapabilities(
+  capabilities: Iterable<string>,
+  enabled: Iterable<string>,
+): RelevantImapCapability[] {
+  const available = new Set(
+    [...capabilities, ...enabled].map((capability) => capability.toUpperCase()),
+  );
+  return relevantImapCapabilities.filter((capability) =>
+    available.has(capability),
+  );
+}
+
 export class ImapSmtpMailProvider implements MailProvider {
   constructor(
     private readonly factories: ProtocolClientFactories = defaultFactories,
@@ -138,6 +226,44 @@ export class ImapSmtpMailProvider implements MailProvider {
       imap: await this.testImap(account.imap),
       smtp: await this.testSmtp(account.smtp),
     };
+  }
+
+  async listMailboxes(
+    account: ProviderImapAccount,
+  ): Promise<MailboxDiscoveryResult> {
+    const client = this.factories.createImap(imapOptions(account.imap));
+    let connected = false;
+    try {
+      await client.connect();
+      connected = true;
+      const listed = await client.list({
+        statusQuery: {
+          messages: true,
+          unseen: true,
+          uidNext: true,
+          uidValidity: true,
+          highestModseq: true,
+        },
+      });
+      return {
+        capabilities: normalizeCapabilities(
+          client.capabilities.keys(),
+          client.enabled,
+        ),
+        mailboxes: listed.map(normalizeMailbox),
+      };
+    } catch (error) {
+      throw new MailProviderOperationError(sanitizeError(error, "IMAP"));
+    } finally {
+      if (connected) {
+        try {
+          await client.logout();
+        } catch {
+          // The discovery result/failure remains authoritative; close below.
+        }
+      }
+      client.close();
+    }
   }
 
   private async testImap(

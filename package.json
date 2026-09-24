@@ -10,7 +10,7 @@
   "packageManager": "pnpm@12.6.0",
   "scripts": {
     "dev": "next dev",
-    "build": "next build && tsc -p tsconfig.worker.json",
+    "build": "next build && tsc -p tsconfig.worker.json && node scripts/fix-worker-imports.mjs",
     "start": "next start",
     "start:worker": "node dist-worker/composition/worker-process.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.worker.json --noEmit",

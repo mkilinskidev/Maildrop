@@ -1,4 +1,5 @@
 import { createWorkerComposition } from "./worker.js";
+import { registerMailboxDiscoveryWorker } from "../modules/mail/infrastructure/mailbox-discovery-jobs.js";
 
 const worker = createWorkerComposition();
 let stopping = false;
@@ -12,6 +13,7 @@ async function shutdown(signal: string) {
   );
   try {
     await worker.jobs.stop();
+    await worker.database.client.end();
     process.exitCode = 0;
   } catch (error) {
     worker.logger.error(
@@ -27,6 +29,11 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 
 try {
   await worker.jobs.start();
+  await registerMailboxDiscoveryWorker(
+    worker.jobs.boss,
+    worker.mailboxDiscovery,
+    worker.config.workerConcurrency,
+  );
 } catch (error) {
   worker.logger.fatal(
     { err: error, event: "worker.start_failed" },

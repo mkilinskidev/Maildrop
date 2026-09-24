@@ -2,7 +2,7 @@
 
 Maildock is a single-user, self-hosted web application intended to bring multiple email accounts into one browser interface.
 
-Maildock is in **early development**. Phase 1A provides one-owner setup/login plus encrypted IMAP/SMTP account configuration and real connection verification. It does **not** synchronize mail, discover or persist mailboxes, send messages, fetch attachments, search mail, or render message content.
+Maildock is in **early development**. Phase 1B provides one-owner setup/login, encrypted IMAP/SMTP account configuration, connection verification, and asynchronous IMAP mailbox discovery with a persisted hierarchy. It does **not** synchronize or fetch messages, send messages, fetch attachments, search mail, or render message content.
 
 The authoritative design is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), governed by the accepted records in [`docs/adr/`](docs/adr/).
 
@@ -89,10 +89,12 @@ Stop the stack with `docker compose -f docker-compose.yml -f docker-compose.dev.
 
 ## Current data model
 
-The `mail_accounts` table stores instance-owned account identity, non-secret provider settings, status, and JSONB encrypted password envelopes. It has no `user_id` and no plaintext credential column. Phase 1A adds no mailbox or message tables. Better Auth retains its separate infrastructure `account` table, and pg-boss manages its own schema.
+The `mail_accounts` table stores instance-owned account identity, non-secret provider settings, connection/discovery state, relevant IMAP capabilities, and JSONB encrypted password envelopes. The `mailboxes` table stores account-scoped remote observations under an independent local UUID. Neither table has `user_id`, and there are no message tables. Better Auth retains its separate infrastructure `account` table, and pg-boss manages its own schema. See [`docs/PHASE_1B.md`](docs/PHASE_1B.md) for identity, lifecycle, and manual verification details.
 
 ## Mail accounts and connection testing
 
 The owner can add, edit, enable/disable, retest, and delete accounts from `/`. Saving does not require a successful connection test: this deliberately permits configuration while a self-hosted provider is temporarily unavailable, and the account remains clearly unverified. Connection tests authenticate to IMAP and call SMTP verification without sending mail. TLS certificates and hostnames remain validated; STARTTLS mode requires a successful upgrade and never downgrades to plaintext.
 
 Stored passwords are never returned to the browser. An empty password field on edit preserves its encrypted envelope; entering a replacement creates new ciphertext with a fresh random IV.
+
+Enabled accounts schedule mailbox discovery after the account transaction commits. The UI shows pending/running/failure state, retains the previous hierarchy after temporary failures, and allows rediscovery. Start the worker (`pnpm start:worker`) alongside a production web process; `pnpm dev` by itself does not execute durable discovery jobs.

@@ -15,6 +15,13 @@
       "when": 1790224856727,
       "tag": "0001_shallow_thunderbolts",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790226999420,
+      "tag": "0002_rich_diamondback",
+      "breakpoints": true
     }
   ]
 }
