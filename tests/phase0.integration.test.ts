@@ -15,6 +15,10 @@ import {
   InstanceAlreadyInitializedError,
   isInstanceInitialized,
 } from "@/modules/auth/application/instance-auth";
+import { checkOwnerApiAccess } from "@/modules/auth/application/api-access-check";
+import { AccountsService } from "@/modules/accounts/application/accounts-service";
+import type { MailProvider } from "@/modules/accounts/domain/mail-provider";
+import { AesGcmSecretEncryption } from "@/shared/infrastructure/crypto/aes-gcm-secret-encryption";
 import { getValidSession } from "@/modules/auth/application/session-validation";
 import { createAuth } from "@/modules/auth/infrastructure/auth-factory";
 import { JobRuntime } from "@/modules/jobs/infrastructure/job-runtime";
@@ -31,6 +35,7 @@ import {
   account,
   instanceState,
   loginThrottle,
+  mailAccounts,
   rateLimit,
   session,
   user,
@@ -80,6 +85,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
   });
 
   beforeEach(async () => {
+    await db.delete(mailAccounts);
     await db.delete(session);
     await db.delete(account);
     await db.delete(user);
@@ -225,5 +231,208 @@ describe("Phase 0 PostgreSQL foundations", () => {
     await jobs.boss.send(queue, { value: "ok" });
     await expect(completed).resolves.toBe("ok");
     await jobs.stop();
+  });
+
+  it("stores encrypted account credentials, preserves or replaces them deliberately, and never returns them", async () => {
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: { success: true },
+      }),
+    };
+    const encryption = new AesGcmSecretEncryption(
+      config.credentialsEncryption.activeKeyId,
+      config.credentialsEncryption.keys,
+    );
+    const service = new AccountsService(db, encryption, provider);
+    const id = "00000000-0000-4000-8000-000000000011";
+    const created = await service.create({
+      id,
+      displayName: "Primary",
+      email: "owner@example.test",
+      enabled: false,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "plain-imap-password",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: false,
+        username: "sender",
+        password: "plain-smtp-password",
+      },
+    });
+
+    expect(created.enabled).toBe(false);
+    expect(JSON.stringify(created)).not.toContain("plain-imap-password");
+    expect(JSON.stringify(created)).not.toContain("plain-smtp-password");
+    const [stored] = await db.select().from(mailAccounts);
+    expect(stored).toBeDefined();
+    expect(JSON.stringify(stored)).not.toContain("plain-imap-password");
+    expect(JSON.stringify(stored)).not.toContain("plain-smtp-password");
+    expect(stored?.imapPassword).toMatchObject({
+      version: 1,
+      algorithm: "AES-256-GCM",
+      keyId: "v1",
+    });
+    const originalImapEnvelope = stored?.imapPassword;
+    const originalSmtpEnvelope = stored?.smtpPassword;
+
+    await service.update(id, {
+      displayName: "Renamed",
+      email: "owner@example.test",
+      enabled: true,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: false,
+        username: "sender",
+      },
+    });
+    const [preserved] = await db.select().from(mailAccounts);
+    expect(preserved?.imapPassword).toEqual(originalImapEnvelope);
+    expect(preserved?.smtpPassword).toEqual(originalSmtpEnvelope);
+
+    const updated = await service.update(id, {
+      displayName: "Renamed",
+      email: "owner@example.test",
+      enabled: true,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "new-imap-password",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 465,
+        security: "tls",
+        useImapCredentials: false,
+        username: "sender",
+        password: "new-smtp-password",
+      },
+    });
+    const [replaced] = await db.select().from(mailAccounts);
+    expect(replaced?.imapPassword).not.toEqual(originalImapEnvelope);
+    expect(replaced?.smtpPassword).not.toEqual(originalSmtpEnvelope);
+    expect(JSON.stringify(updated)).not.toContain("password");
+  });
+
+  it("records separate connection outcomes and deletes an account", async () => {
+    const provider: MailProvider = {
+      testConnection: async () => ({
+        imap: { success: true },
+        smtp: {
+          success: false,
+          category: "authentication_rejected",
+          message: "SMTP authentication was rejected.",
+        },
+      }),
+    };
+    const service = new AccountsService(
+      db,
+      new AesGcmSecretEncryption(
+        config.credentialsEncryption.activeKeyId,
+        config.credentialsEncryption.keys,
+      ),
+      provider,
+    );
+    const id = "00000000-0000-4000-8000-000000000012";
+    await service.create({
+      id,
+      displayName: "Primary",
+      email: "owner@example.test",
+      enabled: true,
+      providerType: "imap_smtp",
+      imap: {
+        host: "imap.example.test",
+        port: 993,
+        security: "tls",
+        username: "owner",
+        password: "secret",
+      },
+      smtp: {
+        host: "smtp.example.test",
+        port: 587,
+        security: "starttls",
+        useImapCredentials: true,
+      },
+    });
+    const report = await service.testExisting(id);
+    expect(report.imap.success).toBe(true);
+    expect(report.smtp.success).toBe(false);
+    expect((await service.get(id)).connectionStatus).toBe("error");
+    await service.delete(id);
+    await expect(service.get(id)).rejects.toThrow("Mail account not found");
+  });
+
+  it("requires an authenticated owner and valid origin for deletion mutations", async () => {
+    await initializeOwner(db, {
+      username: "owner",
+      password: "correct horse battery staple",
+    });
+    const testAuth = createAuth(config, db);
+    const unauthenticated = await checkOwnerApiAccess(
+      testAuth,
+      config,
+      new Request("http://localhost:3000/api/accounts/id", {
+        method: "DELETE",
+        headers: { Origin: config.appOrigin },
+      }),
+      true,
+    );
+    expect(unauthenticated?.status).toBe(401);
+
+    const login = await testAuth.handler(
+      new Request("http://localhost:3000/api/auth/sign-in/username", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: config.appOrigin,
+        },
+        body: JSON.stringify({
+          username: "owner",
+          password: "correct horse battery staple",
+          rememberMe: false,
+        }),
+      }),
+    );
+    const cookie = login.headers.get("set-cookie")?.split(";")[0] ?? "";
+    const wrongOrigin = await checkOwnerApiAccess(
+      testAuth,
+      config,
+      new Request("http://localhost:3000/api/accounts/id", {
+        method: "DELETE",
+        headers: { cookie, Origin: "http://evil.test" },
+      }),
+      true,
+    );
+    expect(wrongOrigin?.status).toBe(403);
+    const authorized = await checkOwnerApiAccess(
+      testAuth,
+      config,
+      new Request("http://localhost:3000/api/accounts/id", {
+        method: "DELETE",
+        headers: { cookie, Origin: config.appOrigin },
+      }),
+      true,
+    );
+    expect(authorized).toBeNull();
   });
 });

@@ -8,6 +8,11 @@ export function createLogger(config: Pick<AppConfig, "logLevel">) {
     redact: {
       paths: [
         "password",
+        "*.password",
+        "**.password",
+        "auth.pass",
+        "*.auth.pass",
+        "**.auth.pass",
         "secret",
         "token",
         "authorization",
@@ -17,6 +22,7 @@ export function createLogger(config: Pick<AppConfig, "logLevel">) {
         "databaseUrl",
         "authSecret",
         "credentialsEncryptionKey",
+        "credentialsEncryption",
       ],
       censor: "[REDACTED]",
     },

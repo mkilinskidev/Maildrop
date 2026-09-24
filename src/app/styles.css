@@ -39,12 +39,118 @@ label {
 }
 
 input,
+select,
 button {
   min-height: 2.75rem;
   padding: 0.65rem 0.8rem;
   border: 1px solid #4b5563;
   border-radius: 0.35rem;
   font: inherit;
+}
+
+select {
+  background: #111827;
+  color: inherit;
+}
+
+.page-shell {
+  place-items: start center;
+}
+.wide {
+  width: min(100%, 70rem);
+}
+.page-header,
+.actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.button-link {
+  display: inline-grid;
+  place-items: center;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 0.35rem;
+  background: #2563eb;
+  color: white;
+  text-decoration: none;
+}
+.button-link.secondary,
+button.secondary {
+  background: #4b5563;
+}
+button.danger {
+  background: #b91c1c;
+}
+.empty-state {
+  margin-top: 2rem;
+  padding: 3rem 1.5rem;
+  text-align: center;
+  border: 1px dashed #4b5563;
+  border-radius: 0.5rem;
+}
+.account-list,
+.account-form {
+  display: grid;
+  gap: 1rem;
+}
+.account-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  background: #1f2937;
+}
+.account-card h2,
+.account-card p {
+  margin: 0 0 0.45rem;
+}
+.muted {
+  color: #9ca3af;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+}
+fieldset {
+  display: grid;
+  gap: 1rem;
+  margin: 0;
+  padding: 1.25rem;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+}
+legend {
+  padding: 0 0.5rem;
+  font-weight: 700;
+}
+label.checkbox {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 0.6rem;
+}
+label.checkbox input {
+  min-height: auto;
+  width: 1rem;
+  height: 1rem;
+}
+.success {
+  color: #86efac;
+}
+.test-results p {
+  margin: 0.35rem 0;
+}
+
+@media (max-width: 700px) {
+  .account-card {
+    flex-direction: column;
+  }
 }
 
 button {

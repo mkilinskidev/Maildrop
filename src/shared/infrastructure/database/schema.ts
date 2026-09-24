@@ -10,7 +10,9 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
 } from "drizzle-orm/pg-core";
+import type { EncryptedEnvelope } from "../../application/secret-encryption.js";
 
 export const instanceState = pgTable(
   "instance_state",
@@ -150,6 +152,85 @@ export const loginThrottle = pgTable("login_throttle", {
     .notNull(),
 });
 
+export const mailAccounts = pgTable(
+  "mail_accounts",
+  {
+    id: uuid("id").primaryKey(),
+    displayName: text("display_name").notNull(),
+    email: text("email").notNull(),
+    enabled: boolean("enabled").default(true).notNull(),
+    providerType: text("provider_type").default("imap_smtp").notNull(),
+    imapHost: text("imap_host").notNull(),
+    imapPort: integer("imap_port").notNull(),
+    imapSecurity: text("imap_security").notNull(),
+    imapUsername: text("imap_username").notNull(),
+    imapPassword: jsonb("imap_password").$type<EncryptedEnvelope>().notNull(),
+    smtpHost: text("smtp_host").notNull(),
+    smtpPort: integer("smtp_port").notNull(),
+    smtpSecurity: text("smtp_security").notNull(),
+    smtpUsesImapCredentials: boolean("smtp_uses_imap_credentials")
+      .default(true)
+      .notNull(),
+    smtpUsername: text("smtp_username"),
+    smtpPassword: jsonb("smtp_password").$type<EncryptedEnvelope>(),
+    connectionStatus: text("connection_status").default("unverified").notNull(),
+    imapStatus: text("imap_status").default("untested").notNull(),
+    imapError: text("imap_error"),
+    smtpStatus: text("smtp_status").default("untested").notNull(),
+    smtpError: text("smtp_error"),
+    lastSuccessfulConnectionTestAt: timestamp(
+      "last_successful_connection_test_at",
+      { withTimezone: true },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    check(
+      "mail_accounts_provider_type",
+      sql`${table.providerType} = 'imap_smtp'`,
+    ),
+    check(
+      "mail_accounts_imap_port",
+      sql`${table.imapPort} between 1 and 65535`,
+    ),
+    check(
+      "mail_accounts_smtp_port",
+      sql`${table.smtpPort} between 1 and 65535`,
+    ),
+    check(
+      "mail_accounts_imap_security",
+      sql`${table.imapSecurity} in ('tls', 'starttls')`,
+    ),
+    check(
+      "mail_accounts_smtp_security",
+      sql`${table.smtpSecurity} in ('tls', 'starttls')`,
+    ),
+    check(
+      "mail_accounts_connection_status",
+      sql`${table.connectionStatus} in ('unverified', 'verified', 'error')`,
+    ),
+    check(
+      "mail_accounts_imap_status",
+      sql`${table.imapStatus} in ('untested', 'success', 'error')`,
+    ),
+    check(
+      "mail_accounts_smtp_status",
+      sql`${table.smtpStatus} in ('untested', 'success', 'error')`,
+    ),
+    check(
+      "mail_accounts_smtp_credentials",
+      sql`(${table.smtpUsesImapCredentials} and ${table.smtpUsername} is null and ${table.smtpPassword} is null) or (not ${table.smtpUsesImapCredentials} and ${table.smtpUsername} is not null and ${table.smtpPassword} is not null)`,
+    ),
+    index("mail_accounts_enabled_idx").on(table.enabled),
+    index("mail_accounts_email_idx").on(table.email),
+  ],
+);
+
 export const userRelations = relations(user, ({ many }) => ({
   sessions: many(session),
   accounts: many(account),
@@ -171,6 +252,7 @@ export const schema = {
   verification,
   rateLimit,
   loginThrottle,
+  mailAccounts,
   userRelations,
   sessionRelations,
   accountRelations,

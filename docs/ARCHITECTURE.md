@@ -399,6 +399,8 @@ Account passwords and future OAuth refresh/access tokens are secrets.
 
 The example environment file contains placeholders only. Production documentation must recommend a secret manager or protected orchestrator secret, restricted filesystem permissions, database encryption at rest where available, and regular key rotation/backup procedures.
 
+ADR 0009 fixes the Phase 1A implementation contract: Node.js AES-256-GCM with a fresh 96-bit IV and explicit 128-bit tag; a versioned envelope carrying algorithm and key ID; identified active and previous 32-byte keys supplied outside PostgreSQL; and protocol-specific AAD `maildock:account-credential:v1:<account-id>:imap|smtp`. SMTP credentials that logically reuse IMAP credentials are not duplicated. Saving an unverified account is allowed so a temporarily unavailable self-hosted provider does not prevent configuration.
+
 ## 14. Instance authentication
 
 Maildock V1 has one instance owner. Authentication gates the entire instance; it does not make the owner part of mail-domain ownership and must not introduce `user_id` columns on mail records.

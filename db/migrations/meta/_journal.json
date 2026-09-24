@@ -8,6 +8,13 @@
       "when": 1790187448211,
       "tag": "0000_dazzling_johnny_storm",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1790224856727,
+      "tag": "0001_shallow_thunderbolts",
+      "breakpoints": true
     }
   ]
 }

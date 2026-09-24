@@ -51,4 +51,38 @@ describe("configuration", () => {
       parseConfig({ ...validEnvironment, MAILDOCK_ENV: "production" }),
     ).toThrow(/HTTPS/);
   });
+
+  it("fails startup when the credential master key is absent or malformed", () => {
+    const withoutKey = {
+      ...validEnvironment,
+      CREDENTIALS_ENCRYPTION_KEY: undefined,
+    };
+    expect(() => parseConfig(withoutKey)).toThrow(/CREDENTIALS_ENCRYPTION_KEY/);
+    expect(() =>
+      parseConfig({
+        ...validEnvironment,
+        CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(31).toString("base64"),
+      }),
+    ).toThrow(/exactly 32 bytes/);
+    expect(() =>
+      parseConfig({
+        ...validEnvironment,
+        CREDENTIALS_ENCRYPTION_KEY_ID: "current",
+      }),
+    ).toThrow(/CREDENTIALS_ENCRYPTION_KEY_ID/);
+  });
+
+  it("accepts identified previous keys for controlled rotation", () => {
+    const config = parseConfig({
+      ...validEnvironment,
+      CREDENTIALS_ENCRYPTION_KEY_ID: "v2",
+      CREDENTIALS_ENCRYPTION_PREVIOUS_KEYS: JSON.stringify({
+        v1: Buffer.alloc(32, 5).toString("base64"),
+      }),
+    });
+    expect(Object.keys(config.credentialsEncryption.keys)).toEqual([
+      "v1",
+      "v2",
+    ]);
+  });
 });
