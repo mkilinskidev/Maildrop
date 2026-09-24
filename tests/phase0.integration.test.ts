@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { migrate } from "drizzle-orm/postgres-js/migrator";
+import { and, eq } from "drizzle-orm";
 import {
   GenericContainer,
   Wait,
@@ -43,6 +44,7 @@ import {
   instanceState,
   loginThrottle,
   mailAccounts,
+  mailboxes,
   rateLimit,
   session,
   user,
@@ -439,7 +441,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
     expect(created.mailboxDiscovery.status).toBe("pending");
   });
 
-  it("reconciles mailbox identity, lifecycle, metadata, and UIDVALIDITY epochs", async () => {
+  it("keeps active path identity idempotent but gives recreated paths new UUIDs", async () => {
     const provider: MailProvider = {
       testConnection: async () => ({
         imap: { success: true },
@@ -494,20 +496,35 @@ describe("Phase 0 PostgreSQL foundations", () => {
       ...overrides,
     });
 
-    await service.reconcile(firstAccount, [
+    const initialRemote = [
       remote("INBOX", {
         specialUse: ["\\Inbox"],
         uidValidity: "10",
         messageCount: "5",
       }),
-      remote("Archive.2025", { messageCount: "3" }),
+      remote("Archive.2025", { messageCount: "3", uidValidity: "77" }),
       remote("Stable", { providerMailboxId: "object-1" }),
-      remote("OldPath"),
-    ]);
+      remote("OldPath", { uidValidity: "44" }),
+    ];
+    await service.reconcile(firstAccount, initialRemote);
     const first = await service.listForAccount(firstAccount, true);
     expect(first).toHaveLength(4);
     const inboxId = first.find((item) => item.remotePath === "INBOX")!.id;
     const stableId = first.find((item) => item.remotePath === "Stable")!.id;
+    const originalArchiveId = first.find(
+      (item) => item.remotePath === "Archive.2025",
+    )!.id;
+    const oldPathId = first.find((item) => item.remotePath === "OldPath")!.id;
+
+    await service.reconcile(firstAccount, initialRemote);
+    const repeated = await service.listForAccount(firstAccount, true);
+    expect(repeated).toHaveLength(4);
+    expect(repeated.find((item) => item.remotePath === "INBOX")?.id).toBe(
+      inboxId,
+    );
+    expect(
+      repeated.find((item) => item.remotePath === "Archive.2025")?.id,
+    ).toBe(originalArchiveId);
 
     await service.reconcile(firstAccount, [
       remote("INBOX", {
@@ -517,7 +534,7 @@ describe("Phase 0 PostgreSQL foundations", () => {
       }),
       remote("Archive.2026", { messageCount: "4" }),
       remote("RenamedStable", { providerMailboxId: "object-1" }),
-      remote("NewPath"),
+      remote("NewPath", { uidValidity: "44" }),
     ]);
     const second = await service.listForAccount(firstAccount, true);
     expect(second.find((item) => item.remotePath === "INBOX")).toMatchObject({
@@ -537,32 +554,136 @@ describe("Phase 0 PostgreSQL foundations", () => {
       second.find((item) => item.remotePath === "OldPath")?.lifecycleStatus,
     ).toBe("missing");
     expect(second.find((item) => item.remotePath === "NewPath")?.id).not.toBe(
-      first.find((item) => item.remotePath === "OldPath")?.id,
+      oldPathId,
+    );
+    expect(
+      second.find((item) => item.remotePath === "NewPath")?.uidValidity,
+    ).toBe("44");
+    const [oldPathAfterMissing] = await db
+      .select({ updatedAt: mailboxes.updatedAt })
+      .from(mailboxes)
+      .where(eq(mailboxes.id, oldPathId));
+
+    const recreatedRemote = [
+      remote("INBOX", { uidValidity: "11" }),
+      remote("Archive.2025", { uidValidity: "77" }),
+      remote("Archive.2026"),
+      remote("NewPath"),
+    ];
+    await service.reconcile(firstAccount, recreatedRemote);
+    const afterSameUidValidity = await service.listForAccount(
+      firstAccount,
+      true,
+    );
+    const archiveRows = afterSameUidValidity.filter(
+      (item) => item.remotePath === "Archive.2025",
+    );
+    expect(archiveRows).toHaveLength(2);
+    expect(archiveRows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: originalArchiveId,
+          lifecycleStatus: "missing",
+          uidValidity: "77",
+        }),
+        expect.objectContaining({
+          lifecycleStatus: "active",
+          uidValidity: "77",
+        }),
+      ]),
+    );
+    const recreatedArchiveId = archiveRows.find(
+      (item) => item.lifecycleStatus === "active",
+    )!.id;
+    expect(recreatedArchiveId).not.toBe(originalArchiveId);
+
+    await service.reconcile(firstAccount, recreatedRemote);
+    const repeatedRecreation = await service.listForAccount(firstAccount, true);
+    expect(
+      repeatedRecreation.filter((item) => item.remotePath === "Archive.2025"),
+    ).toHaveLength(2);
+    expect(
+      repeatedRecreation.find(
+        (item) =>
+          item.remotePath === "Archive.2025" &&
+          item.lifecycleStatus === "active",
+      )?.id,
+    ).toBe(recreatedArchiveId);
+    const [oldPathStillMissing] = await db
+      .select({ updatedAt: mailboxes.updatedAt })
+      .from(mailboxes)
+      .where(eq(mailboxes.id, oldPathId));
+    expect(oldPathStillMissing?.updatedAt).toEqual(
+      oldPathAfterMissing?.updatedAt,
     );
 
     await service.reconcile(firstAccount, [
-      remote("INBOX", { uidValidity: "11" }),
-      remote("Archive.2025"),
-      remote("RenamedStable", { providerMailboxId: "object-1" }),
-      remote("NewPath"),
+      ...recreatedRemote,
+      remote("StableAgain", { providerMailboxId: "object-1" }),
     ]);
     expect(
       (await service.listForAccount(firstAccount, true)).find(
-        (item) => item.remotePath === "Archive.2025",
-      )?.lifecycleStatus,
-    ).toBe("active");
+        (item) => item.remotePath === "StableAgain",
+      ),
+    ).toMatchObject({ id: stableId, lifecycleStatus: "active" });
+
+    await service.reconcile(
+      firstAccount,
+      recreatedRemote.filter((item) => item.remotePath !== "Archive.2025"),
+    );
+    await service.reconcile(firstAccount, [
+      ...recreatedRemote.filter((item) => item.remotePath !== "Archive.2025"),
+      remote("Archive.2025", { uidValidity: "78" }),
+    ]);
+    const afterDifferentUidValidity = (
+      await service.listForAccount(firstAccount, true)
+    ).filter((item) => item.remotePath === "Archive.2025");
+    expect(afterDifferentUidValidity).toHaveLength(3);
+    const activeArchive = afterDifferentUidValidity.find(
+      (item) => item.lifecycleStatus === "active",
+    );
+    expect(activeArchive).toMatchObject({ uidValidity: "78" });
+    expect(activeArchive?.id).not.toBe(originalArchiveId);
+    expect(activeArchive?.id).not.toBe(recreatedArchiveId);
+
+    const duplicateAt = new Date();
+    await expect(
+      db.insert(mailboxes).values({
+        id: "00000000-0000-4000-8000-000000000099",
+        accountId: firstAccount,
+        remotePath: "Archive.2025",
+        name: "2025",
+        delimiter: ".",
+        attributes: [],
+        specialUse: [],
+        selectable: true,
+        lifecycleStatus: "active",
+        firstDiscoveredAt: duplicateAt,
+        lastDiscoveredAt: duplicateAt,
+        createdAt: duplicateAt,
+        updatedAt: duplicateAt,
+      }),
+    ).rejects.toThrow();
+    expect(
+      await db
+        .select({ id: mailboxes.id })
+        .from(mailboxes)
+        .where(
+          and(
+            eq(mailboxes.accountId, firstAccount),
+            eq(mailboxes.remotePath, "Archive.2025"),
+            eq(mailboxes.lifecycleStatus, "active"),
+          ),
+        ),
+    ).toHaveLength(1);
 
     await service.reconcile(secondAccount, [remote("INBOX")]);
     expect(await service.listForAccount(secondAccount)).toHaveLength(1);
-    expect(await service.listForAccount(firstAccount)).toHaveLength(4);
-
-    await service.reconcile(firstAccount, [
-      remote("INBOX", { uidValidity: "11" }),
-      remote("Archive.2025"),
-      remote("RenamedStable", { providerMailboxId: "object-1" }),
-      remote("NewPath"),
-    ]);
-    expect(await service.listForAccount(firstAccount, true)).toHaveLength(6);
+    expect(
+      (await service.listForAccount(firstAccount)).some(
+        (item) => item.remotePath === "INBOX",
+      ),
+    ).toBe(true);
   });
 
   it("retains mailbox data after failure, rejects disabled work, and can retry", async () => {

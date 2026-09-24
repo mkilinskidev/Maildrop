@@ -301,9 +301,11 @@ export const mailboxes = pgTable(
     uniqueIndex("mailboxes_account_provider_id_unique")
       .on(table.accountId, table.providerMailboxId)
       .where(sql`${table.providerMailboxId} is not null`),
-    uniqueIndex("mailboxes_account_path_without_provider_id_unique")
+    uniqueIndex("mailboxes_active_account_path_without_provider_id_unique")
       .on(table.accountId, table.remotePath)
-      .where(sql`${table.providerMailboxId} is null`),
+      .where(
+        sql`${table.providerMailboxId} is null and ${table.lifecycleStatus} = 'active'`,
+      ),
   ],
 );
 

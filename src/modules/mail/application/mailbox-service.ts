@@ -140,13 +140,12 @@ export class MailboxService {
           const pathMatches = local.filter(
             (candidate) =>
               candidate.remotePath === remote.remotePath &&
+              candidate.lifecycleStatus === "active" &&
               !used.has(candidate.id),
           );
           match = remote.providerMailboxId
             ? pathMatches.find((candidate) => !candidate.providerMailboxId)
-            : (pathMatches.find(
-                (candidate) => candidate.lifecycleStatus === "active",
-              ) ?? pathMatches[0]);
+            : pathMatches[0];
         }
 
         if (!match) {
@@ -190,34 +189,24 @@ export class MailboxService {
           .where(eq(mailboxes.id, match.id));
       }
 
-      const missing = local.filter((candidate) => !used.has(candidate.id));
-      if (missing.length > 0) {
+      const newlyMissing = local.filter(
+        (candidate) =>
+          candidate.lifecycleStatus === "active" && !used.has(candidate.id),
+      );
+      if (newlyMissing.length > 0) {
         await tx
           .update(mailboxes)
           .set({
             lifecycleStatus: "missing",
+            missingSince: observedAt,
             updatedAt: observedAt,
           })
           .where(
             inArray(
               mailboxes.id,
-              missing.map((candidate) => candidate.id),
+              newlyMissing.map((candidate) => candidate.id),
             ),
           );
-        const newlyMissing = missing.filter(
-          (candidate) => candidate.missingSince === null,
-        );
-        if (newlyMissing.length > 0) {
-          await tx
-            .update(mailboxes)
-            .set({ missingSince: observedAt })
-            .where(
-              inArray(
-                mailboxes.id,
-                newlyMissing.map((candidate) => candidate.id),
-              ),
-            );
-        }
       }
     });
   }

@@ -9,17 +9,25 @@ Every mailbox has an application-generated UUID. That local ID is independent
 of its account-scoped remote path, UIDVALIDITY, and any provider OBJECTID.
 
 Reconciliation first matches `(account_id, provider_mailbox_id)` when the
-provider supplies a stable mailbox/object ID. A previously path-matched row may
-be upgraded when that ID first appears. Otherwise it matches the exact
-`(account_id, remote_path)`. Accounts are never crossed. Without a stable
-provider ID, a rename is deliberately represented as the old mailbox becoming
-`missing` and a new local mailbox appearing; Phase 1B does not guess that these
-are the same mailbox.
+provider supplies a stable mailbox/object ID, including a historical `missing`
+row. An active path-matched row without an ID may be upgraded when that ID first
+appears. Otherwise the exact `(account_id, remote_path)` fallback applies only
+to a currently `active` row. Accounts are never crossed.
+
+A `missing` row without a matching stable provider ID never wins path fallback.
+If the same path appears later, Maildock creates a new local UUID and retains
+the historical row. Equal UIDVALIDITY is not proof that two observations are
+the same mailbox; different UIDVALIDITY proves that UID-scoped state cannot be
+reused, but UIDVALIDITY is never general mailbox identity or a rename detector.
+Consequently, without a stable provider ID both rename and path reuse are
+represented conservatively as an old `missing` mailbox plus a new local
+mailbox.
 
 Mailboxes absent from a successful listing are marked `missing`, not deleted.
-Their first/last discovery timestamps and prior observations remain. Seeing a
-mailbox again returns it to `active`. A failed listing does not reconcile at all,
-so it cannot mark previously known mailboxes missing.
+Their first/last discovery timestamps and prior observations remain. Only a
+matching stable provider ID can reactivate a historical row; path alone cannot.
+Rows already missing and still absent are left unchanged. A failed listing does
+not reconcile at all, so it cannot mark previously known mailboxes missing.
 
 ## Remote observations
 

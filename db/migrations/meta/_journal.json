@@ -22,6 +22,13 @@
       "when": 1790226999420,
       "tag": "0002_rich_diamondback",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790229946658,
+      "tag": "0003_living_iron_patriot",
+      "breakpoints": true
     }
   ]
 }
